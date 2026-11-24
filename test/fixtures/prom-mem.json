@@ -1,0 +1,15 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {"metric": {"namespace": "production", "pod": "api-7d4f"}, "value": [1732438800, "419430400"]},
+      {"metric": {"namespace": "staging", "pod": "api-bb12"}, "value": [1732438800, "104857600"]},
+      {"metric": {"namespace": "staging", "pod": "batch-2k9"}, "value": [1732438800, "20971520"]},
+      {"metric": {"namespace": "legacy", "pod": "forgotten-0"}, "value": [1732438800, "33554432"]},
+      {"metric": {"namespace": "legacy", "pod": "cache-0"}, "value": [1732438800, "104857600"]},
+      {"metric": {"namespace": "kube-system", "pod": "coredns-a"}, "value": [1732438800, "20971520"]},
+      {"metric": {"namespace": "monitoring", "pod": "prometheus-0"}, "value": [1732438800, "419430400"]}
+    ]
+  }
+}

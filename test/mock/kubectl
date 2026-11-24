@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Fake kubectl for the dry run. Serves test/fixtures and nothing else.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fixtures="${here}/../fixtures"
+
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --context)
+      [[ $# -ge 2 ]] || { printf '%s\n' "mock kubectl: --context needs a value" >&2; exit 1; }
+      shift 2
+      ;;
+    --context=*)
+      shift
+      ;;
+    --request-timeout)
+      [[ $# -ge 2 ]] || { printf '%s\n' "mock kubectl: --request-timeout needs a value" >&2; exit 1; }
+      shift 2
+      ;;
+    --request-timeout=*)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#args[@]} -eq 0 ]]; then
+  printf '%s\n' "mock kubectl: no command" >&2
+  exit 1
+fi
+
+verb="${args[0]}"
+rest=("${args[@]:1}")
+
+if [[ "$verb" == "config" && "${rest[*]:-}" == "current-context" ]]; then
+  printf '%s\n' "demo"
+  exit 0
+fi
+
+if [[ "$verb" == "get" && "${rest[0]:-}" == "--raw" ]]; then
+  if [[ "${MOCK_PROM:-ok}" == "fail" ]]; then
+    printf '%s\n' "mock kubectl: prometheus unavailable" >&2
+    exit 1
+  fi
+  path="${rest[1]:-}"
+  if [[ "$path" == *container_cpu_usage_seconds_total* ]]; then
+    cat "${fixtures}/prom-cpu.json"
+  elif [[ "$path" == *container_memory_working_set_bytes* ]]; then
+    cat "${fixtures}/prom-mem.json"
+  elif [[ "$path" == *query=up* ]]; then
+    printf '%s\n' '{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[0,"1"]}]}}'
+  else
+    printf '%s\n' "mock kubectl: unexpected raw path" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+key="${rest[*]:-}"
+case "${verb} ${key}" in
+  "get pods -A -o json")
+    cat "${fixtures}/pods.json"
+    ;;
+  "get namespaces -o json")
+    cat "${fixtures}/namespaces.json"
+    ;;
+  "get svc -A -o json")
+    cat "${fixtures}/services.json"
+    ;;
+  "get endpointslices.discovery.k8s.io -A -o json")
+    if [[ "${MOCK_SLICES:-ok}" == "fail" ]]; then
+      printf '%s\n' "the server doesn't have a resource type \"endpointslices\"" >&2
+      exit 1
+    fi
+    cat "${fixtures}/endpointslices.json"
+    ;;
+  "get endpoints -A -o json")
+    cat "${fixtures}/endpoints.json"
+    ;;
+  "get pv -o json")
+    cat "${fixtures}/pvs.json"
+    ;;
+  "get pvc -A -o json")
+    cat "${fixtures}/pvcs.json"
+    ;;
+  "top pods -A --no-headers")
+    if [[ "${MOCK_TOP:-ok}" == "fail" ]]; then
+      printf '%s\n' "error: Metrics API not available" >&2
+      exit 1
+    fi
+    cat "${fixtures}/top.txt"
+    ;;
+  *)
+    printf '%s\n' "mock kubectl: unhandled: ${verb} ${key}" >&2
+    exit 1
+    ;;
+esac
