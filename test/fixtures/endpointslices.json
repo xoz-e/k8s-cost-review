@@ -1,0 +1,58 @@
+{
+  "apiVersion": "discovery.k8s.io/v1",
+  "kind": "EndpointSliceList",
+  "items": [
+    {
+      "apiVersion": "discovery.k8s.io/v1",
+      "kind": "EndpointSlice",
+      "metadata": {
+        "name": "api-x",
+        "namespace": "production",
+        "labels": {"kubernetes.io/service-name": "api"}
+      },
+      "addressType": "IPv4",
+      "endpoints": [
+        {"addresses": ["10.0.0.11"], "conditions": {"ready": true}}
+      ]
+    },
+    {
+      "apiVersion": "discovery.k8s.io/v1",
+      "kind": "EndpointSlice",
+      "metadata": {
+        "name": "api-y",
+        "namespace": "staging",
+        "labels": {"kubernetes.io/service-name": "api"}
+      },
+      "addressType": "IPv4",
+      "endpoints": [
+        {"addresses": ["10.0.0.21"], "conditions": {"ready": true}}
+      ]
+    },
+    {
+      "apiVersion": "discovery.k8s.io/v1",
+      "kind": "EndpointSlice",
+      "metadata": {
+        "name": "retired-z",
+        "namespace": "legacy",
+        "labels": {"kubernetes.io/service-name": "retired"}
+      },
+      "addressType": "IPv4",
+      "endpoints": [
+        {"addresses": ["10.0.0.31"], "conditions": {"ready": false}}
+      ]
+    },
+    {
+      "apiVersion": "discovery.k8s.io/v1",
+      "kind": "EndpointSlice",
+      "metadata": {
+        "name": "prometheus-p",
+        "namespace": "monitoring",
+        "labels": {"kubernetes.io/service-name": "prometheus"}
+      },
+      "addressType": "IPv4",
+      "endpoints": [
+        {"addresses": ["10.0.0.41"], "conditions": {"ready": true}}
+      ]
+    }
+  ]
+}

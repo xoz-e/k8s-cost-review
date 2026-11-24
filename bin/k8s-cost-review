@@ -1,0 +1,466 @@
+#!/usr/bin/env bash
+# Read-only cost signals for a Kubernetes cluster you already have.
+# Prints Markdown. Uses kubectl get, and metrics only when they answer.
+set -euo pipefail
+
+# Review heuristics. Not a pricing model.
+# LARGE_CPU_M: flag a CPU request at or above this many millicores.
+# LARGE_MEM_GI: flag a memory request at or above this many gibibytes.
+# LIMIT_RATIO: flag a limit at least this many times its request.
+# OVER_*: request is far above observed usage.
+# UNDER_*: observed usage exceeds the request by this gap.
+LARGE_CPU_M=8000
+LARGE_MEM_GI=16
+LIMIT_RATIO=8
+OVER_RATIO=4
+OVER_MIN_CPU_M=200
+OVER_MIN_MEM_MI=256
+UNDER_CPU_M=50
+UNDER_MEM_MI=64
+
+KUBECTL="${KUBECTL:-kubectl}"
+CONTEXT=""
+PROM_URL="${PROMETHEUS_URL:-}"
+PROM_RANGE="7d"
+TIMEOUT="20s"
+REGISTRIES=()
+
+usage() {
+  cat <<'EOF'
+Usage: k8s-cost-review [options]
+
+Read-only Markdown report of cost signals for the current cluster.
+
+Options:
+  --context NAME              kubeconfig context
+  --internal-registry HOST    registry that counts as the internal mirror
+                              (repeat the flag, or comma-separate hosts)
+  --prometheus-url URL        Prometheus base URL; otherwise look for a Service
+  --prom-range DURATION       window for the Prometheus average (default 7d)
+  --request-timeout DURATION  passed to kubectl (default 20s)
+  -h, --help
+
+PROMETHEUS_URL is read from the environment when the flag is omitted.
+EOF
+}
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit 2
+}
+
+add_registries() {
+  local raw="$1"
+  local part
+  local IFS=','
+  local -a parts
+  read -r -a parts <<<"$raw"
+  for part in "${parts[@]}"; do
+    part="${part#"${part%%[![:space:]]*}"}"
+    part="${part%"${part##*[![:space:]]}"}"
+    part="${part,,}"
+    if [[ -n "$part" ]]; then
+      REGISTRIES+=("$part")
+    fi
+  done
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --context)
+      [[ $# -ge 2 && "$2" != --* ]] || die "--context needs a value"
+      CONTEXT="$2"
+      shift 2
+      ;;
+    --context=*)
+      CONTEXT="${1#*=}"
+      [[ -n "$CONTEXT" ]] || die "--context needs a value"
+      shift
+      ;;
+    --internal-registry)
+      [[ $# -ge 2 && "$2" != --* ]] || die "--internal-registry needs a value"
+      add_registries "$2"
+      shift 2
+      ;;
+    --internal-registry=*)
+      add_registries "${1#*=}"
+      shift
+      ;;
+    --prometheus-url)
+      [[ $# -ge 2 && "$2" != --* ]] || die "--prometheus-url needs a value"
+      PROM_URL="$2"
+      shift 2
+      ;;
+    --prometheus-url=*)
+      PROM_URL="${1#*=}"
+      [[ -n "$PROM_URL" ]] || die "--prometheus-url needs a value"
+      shift
+      ;;
+    --prom-range)
+      [[ $# -ge 2 && "$2" != --* ]] || die "--prom-range needs a value"
+      PROM_RANGE="$2"
+      shift 2
+      ;;
+    --prom-range=*)
+      PROM_RANGE="${1#*=}"
+      shift
+      ;;
+    --request-timeout)
+      [[ $# -ge 2 && "$2" != --* ]] || die "--request-timeout needs a value"
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    --request-timeout=*)
+      TIMEOUT="${1#*=}"
+      shift
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if ! [[ "$PROM_RANGE" =~ ^[0-9]+[smhdwy]$ ]]; then
+  die "--prom-range must look like 7d or 1h"
+fi
+
+case "$PROM_RANGE" in
+  *d|*w) PROM_STEP="1h" ;;
+  *h) PROM_STEP="5m" ;;
+  *) PROM_STEP="1m" ;;
+esac
+
+if ! command -v jq >/dev/null 2>&1; then
+  printf '%s\n' "jq is required" >&2
+  exit 1
+fi
+if ! command -v "$KUBECTL" >/dev/null 2>&1; then
+  printf '%s\n' "kubectl is required (${KUBECTL})" >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "${SCRIPT_DIR}/../lib" && pwd)"
+
+KCTX=()
+if [[ -n "$CONTEXT" ]]; then
+  KCTX+=(--context "$CONTEXT")
+fi
+KCTX+=(--request-timeout "$TIMEOUT")
+
+k_get() {
+  "$KUBECTL" "${KCTX[@]}" get "$@"
+}
+
+k_top() {
+  "$KUBECTL" "${KCTX[@]}" top "$@"
+}
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+fetch_json() {
+  local dest="$1"
+  shift
+  if k_get "$@" >"$dest" 2>"$dest.err"; then
+    return 0
+  fi
+  printf '%s\n' '{"apiVersion":"v1","kind":"List","items":[]}' >"$dest"
+  return 1
+}
+
+first_err() {
+  local file="$1"
+  local line
+  if [[ -s "$file" ]]; then
+    line="$(head -n 1 "$file" | tr -d '\r')"
+    printf '%s' "${line:0:200}"
+  else
+    printf '%s' "kubectl get failed"
+  fi
+}
+
+if ! fetch_json "$tmpdir/pods.json" pods -A -o json; then
+  printf '%s\n' "cannot list pods:" >&2
+  cat "$tmpdir/pods.json.err" >&2
+  exit 1
+fi
+if ! fetch_json "$tmpdir/namespaces.json" namespaces -o json; then
+  printf '%s\n' "cannot list namespaces:" >&2
+  cat "$tmpdir/namespaces.json.err" >&2
+  exit 1
+fi
+
+SVC_OK=0
+EP_OK=0
+PV_OK=0
+PVC_OK=0
+EP_KIND="none"
+if fetch_json "$tmpdir/svc.json" svc -A -o json; then
+  SVC_OK=1
+fi
+if fetch_json "$tmpdir/ep.json" endpointslices.discovery.k8s.io -A -o json; then
+  EP_OK=1
+  EP_KIND="slices"
+elif fetch_json "$tmpdir/ep.json" endpoints -A -o json; then
+  EP_OK=1
+  EP_KIND="endpoints"
+fi
+if fetch_json "$tmpdir/pv.json" pv -o json; then
+  PV_OK=1
+fi
+if fetch_json "$tmpdir/pvc.json" pvc -A -o json; then
+  PVC_OK=1
+fi
+
+SVC_ERR="$(first_err "$tmpdir/svc.json.err")"
+EP_ERR="$(first_err "$tmpdir/ep.json.err")"
+PV_ERR="$(first_err "$tmpdir/pv.json.err")"
+PVC_ERR="$(first_err "$tmpdir/pvc.json.err")"
+
+if [[ ${#REGISTRIES[@]} -eq 0 ]]; then
+  REG_JSON='[]'
+else
+  REG_JSON="$(printf '%s\n' "${REGISTRIES[@]}" | jq -Rs 'split("\n") | map(select(length > 0))')"
+fi
+
+CURL_MAX="${TIMEOUT%s}"
+if ! [[ "$CURL_MAX" =~ ^[0-9]+$ ]]; then
+  CURL_MAX=20
+fi
+
+PROM_MODE=""
+PROM_NS=""
+PROM_NAME=""
+PROM_PORT=""
+HAVE_METRICS=0
+METRICS_FACT="not available"
+printf '%s\n' '[]' >"$tmpdir/metrics.json"
+
+prom_get() {
+  local enc
+  enc="$(jq -nr --arg q "$1" '$q|@uri')"
+  if [[ "$PROM_MODE" == "url" ]]; then
+    curl -fsS --max-time "$CURL_MAX" "${PROM_URL%/}/api/v1/query?query=${enc}"
+  else
+    k_get --raw "/api/v1/namespaces/${PROM_NS}/services/${PROM_NAME}:${PROM_PORT}/proxy/api/v1/query?query=${enc}"
+  fi
+}
+
+prom_ok() {
+  local body
+  if ! body="$(prom_get "$1" 2>/dev/null)"; then
+    return 1
+  fi
+  printf '%s\n' "$body" >"$2"
+  jq -e '.status == "success"' >/dev/null <<<"$body"
+}
+
+cpu_query() {
+  local mode="$1"
+  local base='sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m]))'
+  if [[ "$mode" == "range" ]]; then
+    printf 'avg_over_time((%s)[%s:%s])' "$base" "$PROM_RANGE" "$PROM_STEP"
+  else
+    printf '%s' "$base"
+  fi
+}
+
+mem_query() {
+  local mode="$1"
+  local base='sum by (namespace, pod) (container_memory_working_set_bytes{container!="",container!="POD"})'
+  if [[ "$mode" == "range" ]]; then
+    printf 'avg_over_time((%s)[%s:%s])' "$base" "$PROM_RANGE" "$PROM_STEP"
+  else
+    printf '%s' "$base"
+  fi
+}
+
+write_prom_metrics() {
+  local mode="$1"
+  if ! prom_ok "$(cpu_query "$mode")" "$tmpdir/prom-cpu.json"; then
+    return 1
+  fi
+  if ! prom_ok "$(mem_query "$mode")" "$tmpdir/prom-mem.json"; then
+    return 1
+  fi
+  printf '\n' >"$tmpdir/empty-top.txt"
+  jq -L "$LIB_DIR" -n \
+    --arg source prom \
+    --slurpfile cpu "$tmpdir/prom-cpu.json" \
+    --slurpfile mem "$tmpdir/prom-mem.json" \
+    --rawfile top "$tmpdir/empty-top.txt" \
+    -f "$LIB_DIR/metrics.jq" >"$tmpdir/metrics.json"
+  [[ "$(jq 'length' "$tmpdir/metrics.json")" -gt 0 ]]
+}
+
+discover_prom() {
+  local ns name port
+  [[ "$SVC_OK" -eq 1 ]] || return 1
+  while IFS=$'\t' read -r ns name port; do
+    [[ -n "$ns" && -n "$name" && -n "$port" ]] || continue
+    PROM_MODE="svc"
+    PROM_NS="$ns"
+    PROM_NAME="$name"
+    PROM_PORT="$port"
+    if prom_ok "up" "$tmpdir/prom-up.json"; then
+      return 0
+    fi
+  done < <(jq -r '
+    .items[]
+    | select(.metadata.name == "prometheus"
+        or .metadata.name == "prometheus-k8s"
+        or .metadata.name == "prometheus-operated")
+    | select(((.spec.ports // []) | length) > 0)
+    | [.metadata.namespace, .metadata.name, (.spec.ports[0].port | tostring)]
+    | @tsv
+  ' "$tmpdir/svc.json" | sort)
+  return 1
+}
+
+load_metrics() {
+  local prom_ready=0
+  if [[ -n "$PROM_URL" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      PROM_MODE="url"
+      if prom_ok "up" "$tmpdir/prom-up.json"; then
+        prom_ready=1
+      fi
+    fi
+  elif discover_prom; then
+    prom_ready=1
+  fi
+
+  if [[ "$prom_ready" -eq 1 ]]; then
+    if write_prom_metrics range; then
+      HAVE_METRICS=1
+      if [[ "$PROM_MODE" == "url" ]]; then
+        METRICS_FACT="Prometheus at the given URL, average over ${PROM_RANGE}"
+      else
+        METRICS_FACT="Prometheus ${PROM_NS}/${PROM_NAME}, average over ${PROM_RANGE}"
+      fi
+      return 0
+    fi
+    if write_prom_metrics instant; then
+      HAVE_METRICS=1
+      if [[ "$PROM_MODE" == "url" ]]; then
+        METRICS_FACT="Prometheus at the given URL, instant sample"
+      else
+        METRICS_FACT="Prometheus ${PROM_NS}/${PROM_NAME}, instant sample"
+      fi
+      return 0
+    fi
+  fi
+
+  if k_top pods -A --no-headers >"$tmpdir/top.txt" 2>"$tmpdir/top.err"; then
+    printf '%s\n' '{"status":"success","data":{"result":[]}}' >"$tmpdir/empty-prom.json"
+    jq -L "$LIB_DIR" -n \
+      --arg source top \
+      --slurpfile cpu "$tmpdir/empty-prom.json" \
+      --slurpfile mem "$tmpdir/empty-prom.json" \
+      --rawfile top "$tmpdir/top.txt" \
+      -f "$LIB_DIR/metrics.jq" >"$tmpdir/metrics.json"
+    if [[ "$(jq 'length' "$tmpdir/metrics.json")" -gt 0 ]]; then
+      HAVE_METRICS=1
+      METRICS_FACT="metrics-server, one sample"
+      return 0
+    fi
+  fi
+  HAVE_METRICS=0
+  METRICS_FACT="not available"
+  printf '%s\n' '[]' >"$tmpdir/metrics.json"
+  return 0
+}
+
+load_metrics
+
+if [[ -n "$CONTEXT" ]]; then
+  CTX_NAME="$CONTEXT"
+else
+  CTX_NAME="$("$KUBECTL" "${KCTX[@]}" config current-context 2>/dev/null || printf '%s' "unknown")"
+fi
+
+STAMP="${REVIEW_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+
+if [[ ${#REGISTRIES[@]} -eq 0 ]]; then
+  MIRROR_CELL="not set"
+else
+  MIRROR_CELL=""
+  for part in "${REGISTRIES[@]}"; do
+    if [[ -z "$MIRROR_CELL" ]]; then
+      MIRROR_CELL="$part"
+    else
+      MIRROR_CELL="${MIRROR_CELL}, ${part}"
+    fi
+  done
+fi
+
+render() {
+  jq -L "$LIB_DIR" -r -n \
+    --arg section "$1" \
+    --arg epkind "$EP_KIND" \
+    --arg svc_err "$SVC_ERR" \
+    --arg ep_err "$EP_ERR" \
+    --arg pv_err "$PV_ERR" \
+    --arg pvc_err "$PVC_ERR" \
+    --arg metrics_note "Source: ${METRICS_FACT}." \
+    --argjson svc_ok "$SVC_OK" \
+    --argjson ep_ok "$EP_OK" \
+    --argjson pv_ok "$PV_OK" \
+    --argjson pvc_ok "$PVC_OK" \
+    --argjson have_metrics "$HAVE_METRICS" \
+    --argjson large_cpu "$LARGE_CPU_M" \
+    --argjson large_mem_gi "$LARGE_MEM_GI" \
+    --argjson large_mem "$((LARGE_MEM_GI * 1073741824))" \
+    --argjson ratio "$LIMIT_RATIO" \
+    --argjson over_ratio "$OVER_RATIO" \
+    --argjson over_min_cpu "$OVER_MIN_CPU_M" \
+    --argjson over_min_mem_mi "$OVER_MIN_MEM_MI" \
+    --argjson over_min_mem "$((OVER_MIN_MEM_MI * 1048576))" \
+    --argjson under_cpu "$UNDER_CPU_M" \
+    --argjson under_mem_mi "$UNDER_MEM_MI" \
+    --argjson under_mem "$((UNDER_MEM_MI * 1048576))" \
+    --argjson registries "$REG_JSON" \
+    --slurpfile pods "$tmpdir/pods.json" \
+    --slurpfile namespaces "$tmpdir/namespaces.json" \
+    --slurpfile services "$tmpdir/svc.json" \
+    --slurpfile endpoints "$tmpdir/ep.json" \
+    --slurpfile pvs "$tmpdir/pv.json" \
+    --slurpfile pvcs "$tmpdir/pvc.json" \
+    --slurpfile metrics "$tmpdir/metrics.json" \
+    -f "$LIB_DIR/findings.jq"
+  printf '\n'
+}
+
+cat <<EOF
+# Kubernetes cost review
+
+| | |
+| --- | --- |
+| Context | ${CTX_NAME} |
+| Collected | ${STAMP} |
+| Mirror | ${MIRROR_CELL} |
+| Metrics | ${METRICS_FACT} |
+| Access | read-only |
+
+Thresholds live at the top of the script. This report does not price anything.
+
+EOF
+
+render resources
+render idle
+render nonprod
+render lb
+render volumes
+render images
+render rightsizing
+
+cat <<'EOF'
+---
+
+Read-only. No prices. Questions about ownership, data transfer, scale-in, reservations, and what is in Git are in the checklist, not in this output.
+EOF

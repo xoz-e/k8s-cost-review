@@ -1,0 +1,7 @@
+production api-7d4f 400m 400Mi
+staging api-bb12 40m 100Mi
+staging batch-2k9 5m 20Mi
+legacy forgotten-0 8m 32Mi
+legacy cache-0 180m 100Mi
+kube-system coredns-a 2m 20Mi
+monitoring prometheus-0 180m 400Mi

@@ -1,0 +1,60 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaimList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {"name": "api-data", "namespace": "production"},
+      "spec": {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "10Gi"}},
+        "volumeName": "pv-api"
+      },
+      "status": {"phase": "Bound"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {"name": "cache-data", "namespace": "legacy"},
+      "spec": {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "5Gi"}},
+        "volumeName": "pv-cache"
+      },
+      "status": {"phase": "Bound"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {"name": "job-tmp", "namespace": "dev"},
+      "spec": {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "volumeName": "pv-job"
+      },
+      "status": {"phase": "Bound"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {"name": "import", "namespace": "legacy"},
+      "spec": {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "20Gi"}}
+      },
+      "status": {"phase": "Pending"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {"name": "lost-disk", "namespace": "legacy"},
+      "spec": {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "10Gi"}},
+        "volumeName": "pv-gone"
+      },
+      "status": {"phase": "Lost"}
+    }
+  ]
+}

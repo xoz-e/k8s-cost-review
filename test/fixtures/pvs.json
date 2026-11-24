@@ -1,0 +1,65 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolume",
+      "metadata": {"name": "pv-api"},
+      "spec": {
+        "capacity": {"storage": "10Gi"},
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Delete",
+        "claimRef": {"namespace": "production", "name": "api-data"}
+      },
+      "status": {"phase": "Bound"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolume",
+      "metadata": {"name": "pv-orphan"},
+      "spec": {
+        "capacity": {"storage": "50Gi"},
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Retain"
+      },
+      "status": {"phase": "Available"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolume",
+      "metadata": {"name": "pv-released"},
+      "spec": {
+        "capacity": {"storage": "100Gi"},
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Retain",
+        "claimRef": {"namespace": "legacy", "name": "old-data"}
+      },
+      "status": {"phase": "Released"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolume",
+      "metadata": {"name": "pv-cache"},
+      "spec": {
+        "capacity": {"storage": "5Gi"},
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Delete",
+        "claimRef": {"namespace": "legacy", "name": "cache-data"}
+      },
+      "status": {"phase": "Bound"}
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolume",
+      "metadata": {"name": "pv-job"},
+      "spec": {
+        "capacity": {"storage": "1Gi"},
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Delete",
+        "claimRef": {"namespace": "dev", "name": "job-tmp"}
+      },
+      "status": {"phase": "Bound"}
+    }
+  ]
+}
